@@ -1,8 +1,9 @@
-import joblib
+import os
 import holidays
 import numpy as np
 import pandas as pd
 import streamlit as st
+import xgboost as xgb
 
 st.set_page_config(
     page_title="Demiryolu Kapasite Planlayıcısı",
@@ -48,17 +49,12 @@ ALIAS_MAP = {
 
 
 @st.cache_resource
-def load_model_artifact(path: str = "bart_capacity_xgb.joblib"):
-    loaded = joblib.load(path)
-    if isinstance(loaded, dict):
-        model = loaded.get("model")
-        features = loaded.get("feature_cols", DEFAULT_FEATURES)
-        line_map = loaded.get("line_mapping", LINE_MAPPING)
-    else:
-        model = loaded
-        features = DEFAULT_FEATURES
-        line_map = LINE_MAPPING
-    return model, list(features), line_map
+def load_model_artifact(path: str = "bart_model.json"):
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"'{path}' bulunamadı. Lütfen Colab'da kaydedip repoya yükleyin.")
+    model = xgb.XGBRegressor()
+    model.load_model(path)
+    return model, DEFAULT_FEATURES, LINE_MAPPING
 
 
 def recommend_car_consist(
@@ -129,9 +125,9 @@ def prepare_single_input(row_dict: dict, features: list) -> pd.DataFrame:
 
 
 try:
-    model, features, line_map = load_model_artifact("bart_capacity_xgb.joblib")
-except FileNotFoundError:
-    st.error("`bart_capacity_xgb.joblib` dosyası bulunamadı. Lütfen model dosyasını `app.py` ile aynı dizine yerleştirin.")
+    model, features, line_map = load_model_artifact("bart_model.json")
+except FileNotFoundError as exc:
+    st.error(str(exc))
     st.stop()
 
 with st.sidebar:
