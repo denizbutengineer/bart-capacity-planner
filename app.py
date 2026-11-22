@@ -18,8 +18,8 @@ def load_assets():
 model, meta = load_assets()
 
 STATION_NAMES = {
-    "EMBR": "Embarcadero (SF Downtown)",
-    "MONT": "Montgomery St. (Financial Dist.)",
+    "EMBR": "Embarcadero (San Francisco Downtown)",
+    "MONT": "Montgomery St. (Financial District)",
     "POWL": "Powell St. (Union Square)",
     "CIVC": "Civic Center / UN Plaza",
     "16TH": "16th St. Mission",
@@ -36,7 +36,6 @@ STATION_NAMES = {
     "BERY": "Berryessa / North San José"
 }
 
-# Gerçek BART Ana Hat Koridorları ve İstasyon Sıraları
 BART_LINES = {
     "🟡 Yellow Line (East Bay – Transbay – SFO)": ["19TH", "12TH", "WOAK", "EMBR", "MONT", "POWL", "CIVC", "16TH", "24TH", "DALY", "SFIA"],
     "🔴 Red Line (Berkeley – Transbay – Millbrae)": ["DBRK", "19TH", "12TH", "WOAK", "EMBR", "MONT", "POWL", "CIVC", "16TH", "24TH", "DALY", "MLBR"],
@@ -47,6 +46,27 @@ BART_LINES = {
 
 SLOT_KEYS = ["00 - 10", "10 - 20", "20 - 30", "30 - 40", "40 - 50", "50 - 00"]
 GUNLER_TR = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
+
+def get_weekly_profile(selected_date: datetime.date):
+    """Seçilen tarihin yılın haftasına ve ay içi dönemine göre gerçekçi talep katsayısı."""
+    week_num = selected_date.isocalendar()[1]
+    day_of_month = selected_date.day
+
+    # Özel tatil haftaları (ABD Thanksgiving, Noel/Yılbaşı, Temmuz 4)
+    if week_num in (47, 52, 1):
+        return 0.72, f"Tatil Haftası (Hafta {week_num} | -%28)"
+    if week_num in (27, 35):
+        return 0.84, f"Sezon Geçiş Haftası (Hafta {week_num} | -%16)"
+
+    # Aynı ay içindeki haftalar arası belirgin operasyonel fark (ay başı / ortası / sonu + mevsimsel dalga)
+    month_week_idx = (day_of_month - 1) // 7  # 0, 1, 2, 3, 4
+    intra_month_factors = [1.08, 0.96, 1.12, 0.91, 1.03]
+    seasonal_wave = 1.0 + 0.09 * np.sin(2 * np.pi * (week_num - 8) / 52.0)
+
+    factor = round(intra_month_factors[month_week_idx] * seasonal_wave, 3)
+    pct_diff = int(round((factor - 1.0) * 100))
+    sign = "+" if pct_diff >= 0 else ""
+    return factor, f"Hafta {week_num} Takvim Etkisi ({sign}%{pct_diff})"
 
 def get_intrahour_weights(hour: int, is_weekend: bool, has_airport: bool) -> dict:
     if not is_weekend and hour in (6, 7, 15, 16):
@@ -64,7 +84,7 @@ def get_intrahour_weights(hour: int, is_weekend: bool, has_airport: bool) -> dic
     raw = raw / raw.sum()
     return dict(zip(SLOT_KEYS, raw))
 
-def predict_station_hourly(origin_code: str, hour: int, day_idx: int, is_weekend: int, month_val: int, week_of_year: int) -> int:
+def predict_station_hourly(origin_code: str, hour: int, day_idx: int, is_weekend: int, month_val: int, week_factor: float) -> int:
     is_commute_peak = 1 if ((is_weekend == 0) and ((7 <= hour <= 9) or (16 <= hour <= 19))) else 0
     hour_sin = np.sin(2 * np.pi * hour / 24.0)
     hour_cos = np.cos(2 * np.pi * hour / 24.0)
@@ -110,11 +130,6 @@ def predict_station_hourly(origin_code: str, hour: int, day_idx: int, is_weekend
     else:
         day_factor = 1.00
 
-    if week_of_year in (47, 52, 1):
-        week_factor = 0.78
-    else:
-        week_factor = 1.0 + 0.05 * np.sin(2 * np.pi * (week_of_year - 10) / 52.0)
-
     return max(0, int(round(raw_pred * day_factor * week_factor)))
 
 st.title("🚆 BART Hat Bazlı 10-Dk Yolcu Yoğunluğu ve Vagon Optimizasyonu")
@@ -140,16 +155,15 @@ day_idx = selected_date.weekday()
 day_name = GUNLER_TR[day_idx]
 is_weekend = 1 if day_idx >= 5 else 0
 month_val = selected_date.month
-week_of_year = selected_date.isocalendar()[1]
+week_factor, week_label = get_weekly_profile(selected_date)
 has_airport = any(st_code in {'SFIA', 'OAKL', 'MLBR'} for st_code in line_stations)
 
 slot_weights_dict = get_intrahour_weights(hour, bool(is_weekend), has_airport)
 slot_weight = slot_weights_dict[slot_label]
 
-# Hattaki tüm istasyonlar için tahminleri hesapla
 station_rows = []
 for st_code in line_stations:
-    h_pred = predict_station_hourly(st_code, hour, day_idx, is_weekend, month_val, week_of_year)
+    h_pred = predict_station_hourly(st_code, hour, day_idx, is_weekend, month_val, week_factor)
     s_pred = int(round(h_pred * slot_weight))
     station_rows.append({
         "Kod": st_code,
@@ -162,13 +176,11 @@ line_df = pd.DataFrame(station_rows)
 total_line_hourly = int(line_df["Saatlik Talep"].sum())
 total_line_10min = int(line_df["10 Dk Talep"].sum())
 
-# Hat darboğaz yükü: Tek bir trenin aynı koridor kesitinde taşıyacağı pik yük (hat toplamının ~%38'i eşzamanlı trende bulunur)
 corridor_concurrent_share = 0.38
 bottleneck_row = line_df.loc[line_df["10 Dk Talep"].idxmax()]
 corridor_peak_10min = int(round(total_line_10min * corridor_concurrent_share))
 passengers_per_train = corridor_peak_10min / trains_in_10min
 
-# Hat bazlı vagon optimizasyonu (3 - 10 vagon)
 required_cars = int(np.ceil(passengers_per_train / 150.0))
 recommended_consist = min(10, max(3, required_cars))
 train_capacity = recommended_consist * 150
@@ -176,7 +188,7 @@ occupancy_rate = min(100.0, (passengers_per_train / train_capacity) * 100)
 
 st.subheader(f"{selected_line} | {selected_date.strftime('%d.%m.%Y')} ({day_name}) | {hour:02d}:{slot_label.split(' - ')[0]} – {hour:02d}:{slot_label.split(' - ')[1]}")
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("Hat Toplam 10 Dk Talep", f"{total_line_10min:,} kişi", f"Saatlik Hat: {total_line_hourly:,}")
+col1.metric("Hat Toplam 10 Dk Talep", f"{total_line_10min:,} kişi", week_label)
 col2.metric("Darboğaz Tren Başına Yük", f"{int(passengers_per_train):,} kişi", f"Kritik Nokta: {bottleneck_row['Kod']}")
 col3.metric("Hat Vagon Dizilimi", f"{recommended_consist} Vagonlu Set")
 col4.metric("Kritik Kesit Doluluğu", f"%{occupancy_rate:.1f}")
@@ -211,6 +223,6 @@ with right_col:
 with st.expander("📂 Veri Seti ve Hat Optimizasyon Metodolojisi"):
     st.markdown("""
     - **Veri Kaynağı & Lisans:** Bay Area Rapid Transit (BART) Resmi Açık Veri Portalı (*Hourly Ridership by Origin-Destination Pairs*, Creative Commons Attribution **CC-BY**)[cite: 369].
-    - **Hat Bazlı Modelleme Yaklaşımı:** `XGBoost Regressor` modeli seçilen hat koridorundaki tüm istasyonların saatlik biniş talebini ayrı ayrı tahmin eder; 10 dakikalık zaman dilimi ağırlıkları ve eşzamanlı koridor yük katsayısı (`%38`) ile hattın en kritik darboğaz noktasındaki tren başına yolcu yükü hesaplanır.
+    - **Hat Bazlı Modelleme Yaklaşımı:** `XGBoost Regressor` modeli seçilen hat koridorundaki tüm istasyonların saatlik biniş talebini ayrı ayrı tahmin eder; haftalık takvim katsayısı, 10 dakikalık zaman dilimi ağırlıkları ve eşzamanlı koridor yük katsayısı (`%38`) ile hattın en kritik darboğaz noktasındaki tren başına yolcu yükü hesaplanır.
     - **Vagon Dizilim Kuralı:** Vagon başına maksimum konfor kapasitesi **150 yolcu** alınarak hat geneli için **3 ile 10 vagon** arasında ortak dizi önerisi sunulur.
     """)
