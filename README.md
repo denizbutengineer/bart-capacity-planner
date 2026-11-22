@@ -10,10 +10,10 @@ Bay Area Rapid Transit (BART) açık ulaşım verileri (`date-hour-soo-dest-2025
 - **Özellik:** Tamamen gerçek gözlem verileri kullanılmış olup eğitim ve çıkarım aşamalarında hiçbir sentetik veri veya yapay katsayı eklenmemiştir.
 
 ## 🛠️ Metodoloji (15 Aşamalı Veri Bilimi Pipeline'ı)
-1. **Veri Kalitesi & Dönüşüm:** Gece işletme dışı saatler (`01:00–04:00`) filtrelenmiş, başlangıç-varış kayıtları istasyon ve saat bazında (`Total_Riders`) toplulaştırılmıştır.
-2. **Öznitelik Mühendisliği:** Döngüsel saat temsilleri (`Hour_Sin`, `Hour_Cos`), hafta içi pik saat göstergesi (`Is_Commute_Peak`), hafta sonu (`Is_Weekend`), ay (`Month`) ve koridor göstergeleri (`Is_Transbay_Core`, `Is_Airport`) türetilmiştir.
-3. **Doğrulama Protokolü:** Zaman serisi sızıntısını önlemek için `shuffle=False` ile kronolojik %80/%20 ayrım ve 3 katlı `TimeSeriesSplit` kullanılmıştır.
-4. **Model Karşılaştırma & Optimizasyon:** `DummyRegressor` baseline dahil 8 farklı regresyon modeli kıyaslanmış; `RandomizedSearchCV` ile optimize edilen **XGBoost Regressor** canlı sisteme entegre edilmiştir.
+1. **Veri Kalitesi & Dönüşüm:** Gece işletme dışı saatler (`01:00–04:00`) ve negatif değerler temizlenmiş, başlangıç-varış kayıtları istasyon ve saat bazında (`Total_Riders`) toplulaştırılmıştır.
+2. **EDA & Özellik Seçimi:** Sağa çarpık (Right-Skewed) yolcu dağılımı ve çift tepeli (Bimodal) pik saat örüntüleri analiz edilmiş; Filter (`VarianceThreshold`, `SelectKBest`, `Mutual Info`), Wrapper (`RFE`) ve Embedded (`Lasso L1`, `Random Forest Importance`) yöntemleriyle öznitelikler doğrulanmıştır.
+3. **Doğrulama Protokolü:** Veri sızıntısını (Data Leakage) önlemek için `shuffle=False` ile kronolojik ayrım (%70 Train / %15 Validation / %15 Test) ve 3 katlı `TimeSeriesSplit` kullanılmıştır.
+4. **Model Karşılaştırma & Optimizasyon:** `OLS Linear Regression` baseline dahil 9 regresyon modeli kıyaslanmış; `RandomizedSearchCV` ile optimize edilen **XGBoost Regressor** canlı sisteme entegre edilmiştir.
 
 ## 🚀 Yerel Kurulum ve Çalıştırma
 ```bash
