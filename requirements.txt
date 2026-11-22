@@ -1,9 +1,5 @@
 streamlit
-pandas
 numpy
-lightgbm
-scikit-learn
-joblib
+pandas
 holidays
-matplotlib
-seaborn
+xgboost
