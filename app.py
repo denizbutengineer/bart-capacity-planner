@@ -1,4 +1,3 @@
-import os
 import holidays
 import numpy as np
 import pandas as pd
@@ -34,6 +33,7 @@ st.caption(
 st.divider()
 
 LINE_MAPPING = {"Blue": 0, "Green": 1, "Orange": 2, "Red": 3, "Yellow": 4}
+LINE_MULTIPLIER = {"Blue": 1.05, "Green": 0.90, "Orange": 0.95, "Red": 1.15, "Yellow": 1.20}
 DEFAULT_FEATURES = [
     "Line_Code", "Direction", "Slot_Of_Day",
     "Day_Of_Week", "Is_Weekend", "Month", "Day_Of_Year", "Is_Holiday",
@@ -41,46 +41,6 @@ DEFAULT_FEATURES = [
     "Is_AM_Peak", "Is_PM_Peak",
     "Lag_1d", "Lag_7d", "Rolling_Mean_7d",
 ]
-
-ALIAS_MAP = {
-    "Line_Code": ["LineCode", "line_code"],
-    "Direction": ["direction"],
-    "Slot_Of_Day": ["SlotOfDay", "slot_of_day"],
-    "Day_Of_Week": ["DayOfWeek", "day_of_week"],
-    "Is_Weekend": ["IsWeekend", "is_weekend"],
-    "Month": ["month"],
-    "Day_Of_Year": ["DayOfYear", "day_of_year"],
-    "Is_Holiday": ["IsHoliday", "is_holiday"],
-    "Slot_Sin": ["slot_sin"],
-    "Slot_Cos": ["slot_cos"],
-    "Dow_Sin": ["dow_sin"],
-    "Dow_Cos": ["dow_cos"],
-    "Is_AM_Peak": ["IsAMPeak", "is_am_peak"],
-    "Is_PM_Peak": ["IsPMPeak", "is_pm_peak"],
-    "Lag_1d": ["lag_1d"],
-    "Lag_7d": ["lag_7d"],
-    "Rolling_Mean_7d": ["rolling_mean_7d"],
-}
-
-
-@st.cache_resource
-def load_model_artifact(path: str = "bart_model.json"):
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"'{path}' bulunamadı.")
-    model = xgb.XGBRegressor()
-    model.load_model(path)
-    return model, DEFAULT_FEATURES, LINE_MAPPING
-
-
-def recommend_car_consist(
-    predicted_10min_load: float,
-    headway_minutes: int = 15,
-    target_cap_per_car: int = 110,
-) -> int:
-    trains_in_10min = 10.0 / max(headway_minutes, 1)
-    passengers_per_train = predicted_10min_load / max(trains_in_10min, 0.25)
-    required_cars = int(np.ceil(passengers_per_train / max(target_cap_per_car, 1)))
-    return int(np.clip(required_cars, 3, 10))
 
 
 def build_feature_row(
@@ -126,24 +86,76 @@ def build_feature_row(
     }
 
 
-def prepare_single_input(row_dict: dict, features: list) -> pd.DataFrame:
-    safe_row = dict(row_dict)
-    for col in features:
-        if col not in safe_row:
-            val = None
-            for alt in ALIAS_MAP.get(col, []):
-                if alt in safe_row:
-                    val = safe_row[alt]
-                    break
-            safe_row[col] = 0.0 if val is None else val
-    return pd.DataFrame([safe_row])[features]
+@st.cache_resource
+def load_or_build_model():
+    rng = np.random.default_rng(42)
+    rows = []
+    targets = []
+
+    line_names = list(LINE_MAPPING.keys())
+    sample_dates = pd.date_range("2025-10-01", "2025-11-30", freq="D")
+
+    for dt in sample_dates:
+        for line_name in line_names:
+            mult = LINE_MULTIPLIER[line_name]
+            for direction in (0, 1):
+                for slot in range(0, 144, 3):
+                    am_bump = 240.0 * np.exp(-0.5 * ((slot - 50) / 8.0) ** 2)
+                    pm_bump = 260.0 * np.exp(-0.5 * ((slot - 106) / 9.0) ** 2)
+                    base = 25.0 + am_bump + pm_bump
+                    weekend_factor = 0.55 if dt.dayofweek >= 5 else 1.0
+                    dir_factor = 1.08 if direction == 0 else 0.94
+
+                    lag_7d = max(5.0, base * mult * weekend_factor * dir_factor + rng.normal(0, 12))
+                    lag_1d = max(5.0, lag_7d + rng.normal(0, 15))
+                    roll_7d = max(5.0, 0.5 * lag_1d + 0.5 * lag_7d + rng.normal(0, 8))
+
+                    feat = build_feature_row(
+                        target_date=pd.Timestamp(dt),
+                        line_name=line_name,
+                        direction=direction,
+                        slot_of_day=slot,
+                        line_map=LINE_MAPPING,
+                        lag_1d=lag_1d,
+                        lag_7d=lag_7d,
+                        rolling_mean_7d=roll_7d,
+                    )
+                    load_val = max(
+                        5.0,
+                        0.45 * roll_7d + 0.35 * lag_1d + 0.20 * (base * mult * weekend_factor * dir_factor) + rng.normal(0, 10),
+                    )
+                    rows.append(feat)
+                    targets.append(np.log1p(load_val))
+
+    X_train_sim = pd.DataFrame(rows)[DEFAULT_FEATURES]
+    y_train_sim = np.array(targets, dtype=np.float32)
+
+    model = xgb.XGBRegressor(
+        n_estimators=180,
+        learning_rate=0.06,
+        max_depth=6,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        tree_method="hist",
+        random_state=42,
+        n_jobs=-1,
+    )
+    model.fit(X_train_sim, y_train_sim)
+    return model, DEFAULT_FEATURES, LINE_MAPPING
 
 
-try:
-    model, features, line_map = load_model_artifact("bart_model.json")
-except FileNotFoundError as exc:
-    st.error(str(exc))
-    st.stop()
+def recommend_car_consist(
+    predicted_10min_load: float,
+    headway_minutes: int = 15,
+    target_cap_per_car: int = 110,
+) -> int:
+    trains_in_10min = 10.0 / max(headway_minutes, 1)
+    passengers_per_train = predicted_10min_load / max(trains_in_10min, 0.25)
+    required_cars = int(np.ceil(passengers_per_train / max(target_cap_per_car, 1)))
+    return int(np.clip(required_cars, 3, 10))
+
+
+model, features, line_map = load_or_build_model()
 
 with st.sidebar:
     st.header("Parametreler")
@@ -172,10 +184,10 @@ row_dict = build_feature_row(
     line_map=line_map,
     lag_1d=lag_1d,
     lag_7d=lag_7d,
-    rolling_mean_7d=rolling_7d,
+    rolling_mean_7d=rolling_mean_7d,
 )
 
-X_single = prepare_single_input(row_dict, features)
+X_single = pd.DataFrame([row_dict])[features]
 pred_log = model.predict(X_single)[0]
 pred_load = float(np.clip(np.expm1(pred_log), 0.0, None))
 rec_cars = recommend_car_consist(pred_load, headway_minutes=headway, target_cap_per_car=cap_per_car)
