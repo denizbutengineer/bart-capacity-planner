@@ -18,8 +18,8 @@ def load_assets():
 model, meta = load_assets()
 
 STATION_NAMES = {
-    "EMBR": "Embarcadero (San Francisco Downtown)",
-    "MONT": "Montgomery St. (Financial District)",
+    "EMBR": "Embarcadero (SF Downtown)",
+    "MONT": "Montgomery St. (Financial Dist.)",
     "POWL": "Powell St. (Union Square)",
     "CIVC": "Civic Center / UN Plaza",
     "16TH": "16th St. Mission",
@@ -47,44 +47,7 @@ BART_LINES = {
 SLOT_KEYS = ["00 - 10", "10 - 20", "20 - 30", "30 - 40", "40 - 50", "50 - 00"]
 GUNLER_TR = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
 
-def get_weekly_profile(selected_date: datetime.date):
-    """Seçilen tarihin yılın haftasına ve ay içi dönemine göre gerçekçi talep katsayısı."""
-    week_num = selected_date.isocalendar()[1]
-    day_of_month = selected_date.day
-
-    # Özel tatil haftaları (ABD Thanksgiving, Noel/Yılbaşı, Temmuz 4)
-    if week_num in (47, 52, 1):
-        return 0.72, f"Tatil Haftası (Hafta {week_num} | -%28)"
-    if week_num in (27, 35):
-        return 0.84, f"Sezon Geçiş Haftası (Hafta {week_num} | -%16)"
-
-    # Aynı ay içindeki haftalar arası belirgin operasyonel fark (ay başı / ortası / sonu + mevsimsel dalga)
-    month_week_idx = (day_of_month - 1) // 7  # 0, 1, 2, 3, 4
-    intra_month_factors = [1.08, 0.96, 1.12, 0.91, 1.03]
-    seasonal_wave = 1.0 + 0.09 * np.sin(2 * np.pi * (week_num - 8) / 52.0)
-
-    factor = round(intra_month_factors[month_week_idx] * seasonal_wave, 3)
-    pct_diff = int(round((factor - 1.0) * 100))
-    sign = "+" if pct_diff >= 0 else ""
-    return factor, f"Hafta {week_num} Takvim Etkisi ({sign}%{pct_diff})"
-
-def get_intrahour_weights(hour: int, is_weekend: bool, has_airport: bool) -> dict:
-    if not is_weekend and hour in (6, 7, 15, 16):
-        raw = np.array([0.11, 0.13, 0.16, 0.18, 0.20, 0.22])
-    elif not is_weekend and hour in (8, 17):
-        raw = np.array([0.14, 0.19, 0.21, 0.18, 0.15, 0.13])
-    elif not is_weekend and hour in (9, 18, 19):
-        raw = np.array([0.22, 0.20, 0.18, 0.15, 0.13, 0.12])
-    elif hour >= 20:
-        raw = np.array([0.21, 0.19, 0.17, 0.16, 0.14, 0.13])
-    elif has_airport:
-        raw = np.array([0.15, 0.18, 0.19, 0.17, 0.16, 0.15])
-    else:
-        raw = np.array([0.15, 0.17, 0.18, 0.18, 0.16, 0.16])
-    raw = raw / raw.sum()
-    return dict(zip(SLOT_KEYS, raw))
-
-def predict_station_hourly(origin_code: str, hour: int, day_idx: int, is_weekend: int, month_val: int, week_factor: float) -> int:
+def predict_station_hourly(origin_code: str, hour: int, day_idx: int, is_weekend: int, month_val: int) -> int:
     is_commute_peak = 1 if ((is_weekend == 0) and ((7 <= hour <= 9) or (16 <= hour <= 19))) else 0
     hour_sin = np.sin(2 * np.pi * hour / 24.0)
     hour_cos = np.cos(2 * np.pi * hour / 24.0)
@@ -123,17 +86,10 @@ def predict_station_hourly(origin_code: str, hour: int, day_idx: int, is_weekend
     cat_ohe = np.array([1.0 if st_code == origin_code else 0.0 for st_code in meta["stations"]], dtype=float)
     X_input = np.concatenate([num_scaled, cat_ohe]).reshape(1, -1)
 
-    raw_pred = max(0.0, float(model.predict(X_input)[0]))
-
-    if len(center) == 6 or (len(scale) >= 3 and scale[2] == 0):
-        day_factor = 0.60 if day_idx == 5 else (0.43 if day_idx == 6 else 1.00)
-    else:
-        day_factor = 1.00
-
-    return max(0, int(round(raw_pred * day_factor * week_factor)))
+    return max(0, int(round(float(model.predict(X_input)[0]))))
 
 st.title("🚆 BART Hat Bazlı 10-Dk Yolcu Yoğunluğu ve Vagon Optimizasyonu")
-st.markdown("Gerçek BART açık verileriyle eğitilmiş ML talep tahmini ve **hat koridoru darboğazına göre** dinamik vagon dizilimi karar destek sistemi.")
+st.markdown("Yalnızca gerçek BART açık verileriyle (`date-hour-soo-dest-2025.csv`) eğitilmiş `XGBoost` modeli ve **hat koridoru darboğazına göre** vagon dizilimi karar destek sistemi.")
 
 with st.sidebar:
     st.header("⚙️ Hat ve Sefer Parametreleri")
@@ -155,15 +111,13 @@ day_idx = selected_date.weekday()
 day_name = GUNLER_TR[day_idx]
 is_weekend = 1 if day_idx >= 5 else 0
 month_val = selected_date.month
-week_factor, week_label = get_weekly_profile(selected_date)
-has_airport = any(st_code in {'SFIA', 'OAKL', 'MLBR'} for st_code in line_stations)
 
-slot_weights_dict = get_intrahour_weights(hour, bool(is_weekend), has_airport)
-slot_weight = slot_weights_dict[slot_label]
+# Ham veri saatlik çözünürlükte olduğu için her 10 dk penceresi saatlik tahminin tam 1/6'sıdır (sıfır sentetik katsayı)
+slot_weight = 1.0 / 6.0
 
 station_rows = []
 for st_code in line_stations:
-    h_pred = predict_station_hourly(st_code, hour, day_idx, is_weekend, month_val, week_factor)
+    h_pred = predict_station_hourly(st_code, hour, day_idx, is_weekend, month_val)
     s_pred = int(round(h_pred * slot_weight))
     station_rows.append({
         "Kod": st_code,
@@ -176,10 +130,9 @@ line_df = pd.DataFrame(station_rows)
 total_line_hourly = int(line_df["Saatlik Talep"].sum())
 total_line_10min = int(line_df["10 Dk Talep"].sum())
 
-corridor_concurrent_share = 0.38
 bottleneck_row = line_df.loc[line_df["10 Dk Talep"].idxmax()]
-corridor_peak_10min = int(round(total_line_10min * corridor_concurrent_share))
-passengers_per_train = corridor_peak_10min / trains_in_10min
+bottleneck_10min_load = int(bottleneck_row["10 Dk Talep"])
+passengers_per_train = bottleneck_10min_load / trains_in_10min
 
 required_cars = int(np.ceil(passengers_per_train / 150.0))
 recommended_consist = min(10, max(3, required_cars))
@@ -188,10 +141,10 @@ occupancy_rate = min(100.0, (passengers_per_train / train_capacity) * 100)
 
 st.subheader(f"{selected_line} | {selected_date.strftime('%d.%m.%Y')} ({day_name}) | {hour:02d}:{slot_label.split(' - ')[0]} – {hour:02d}:{slot_label.split(' - ')[1]}")
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("Hat Toplam 10 Dk Talep", f"{total_line_10min:,} kişi", week_label)
-col2.metric("Darboğaz Tren Başına Yük", f"{int(passengers_per_train):,} kişi", f"Kritik Nokta: {bottleneck_row['Kod']}")
+col1.metric("Hat Toplam 10 Dk Talep", f"{total_line_10min:,} kişi", f"Saatlik Hat: {total_line_hourly:,}")
+col2.metric("Darboğaz Tren Başına Yük", f"{int(passengers_per_train):,} kişi", f"Kritik İstasyon: {bottleneck_row['Kod']}")
 col3.metric("Hat Vagon Dizilimi", f"{recommended_consist} Vagonlu Set")
-col4.metric("Kritik Kesit Doluluğu", f"%{occupancy_rate:.1f}")
+col4.metric("Kritik İstasyon Doluluğu", f"%{occupancy_rate:.1f}")
 
 st.divider()
 
@@ -200,29 +153,32 @@ left_col, right_col = st.columns([1.15, 1])
 with left_col:
     st.markdown("### 🚦 Hat Operasyonel Karar Özeti")
     if occupancy_rate > 90:
-        st.error(f"⚠️ **Hat Darboğazı / Kritik Yığılma:** `{bottleneck_row['İstasyon']}` kesitinde maksimum yığılma bekleniyor. Hattaki tüm seferler **10 vagonlu maksimum dizi** ile işletilmelidir.")
+        st.error(f"⚠️ **Hat Darboğazı / Kritik Yığılma:** `{bottleneck_row['İstasyon']}` istasyonunda yüksek talep bekleniyor. Hattaki tüm seferler **10 vagonlu maksimum dizi** ile işletilmelidir.")
     elif occupancy_rate > 65:
-        st.warning(f"🟡 **Dengeli Hat İşletmesi:** `{recommended_consist} vagonlu` tren dizilimi `{bottleneck_row['Kod']}` darboğaz noktası dahil tüm hat boyunca konfor sınırlarını korumaktadır.")
+        st.warning(f"🟡 **Dengeli Hat İşletmesi:** `{recommended_consist} vagonlu` tren dizilimi `{bottleneck_row['Kod']}` darboğaz istasyonu dahil tüm hattı konfor sınırlarında karşılamaktadır.")
     else:
-        st.success(f"🟢 **Hat Boyu Enerji Optimizasyonu:** `{hour:02d}:{slot_label}` penceresinde hat genelinde talep düşüktür; **{recommended_consist} vagonlu kısa dizi** ile cer enerjisi tasarrufu sağlanabilir.")
+        st.success(f"🟢 **Hat Boyu Enerji Optimizasyonu:** `{hour:02d}:{slot_label}` penceresinde talep düşüktür; **{recommended_consist} vagonlu kısa dizi** ile cer enerjisi tasarrufu sağlanabilir.")
     
-    st.markdown("#### 📍 Hat Üzerindeki İstasyonların 10 Dk Talep Dağılımı")
+    st.markdown("#### 📍 Hat Üzerindeki İstasyonların Gerçek Model Tahminleri")
     st.dataframe(line_df, use_container_width=True, hide_index=True)
 
 with right_col:
-    st.markdown(f"### 📊 {hour:02d}:00 Saati İçi Hat 10 Dk Akışı")
-    chart_df = pd.DataFrame({
-        "10 Dk Dilimi": [f"{hour:02d}:{k.split(' - ')[0]}" for k in slot_weights_dict.keys()],
-        "Hat Toplam Yolcu": [int(round(total_line_hourly * w)) for w in slot_weights_dict.values()]
-    }).set_index("10 Dk Dilimi")
-    st.bar_chart(chart_df, color="#38bdf8")
-
     st.markdown("### 🚉 İstasyon Bazlı Darboğaz Karşılaştırması")
     st.bar_chart(line_df.set_index("Kod")[["10 Dk Talep"]], color="#f59e0b")
 
-with st.expander("📂 Veri Seti ve Hat Optimizasyon Metodolojisi"):
-    st.markdown("""
-    - **Veri Kaynağı & Lisans:** Bay Area Rapid Transit (BART) Resmi Açık Veri Portalı (*Hourly Ridership by Origin-Destination Pairs*, Creative Commons Attribution **CC-BY**)[cite: 369].
-    - **Hat Bazlı Modelleme Yaklaşımı:** `XGBoost Regressor` modeli seçilen hat koridorundaki tüm istasyonların saatlik biniş talebini ayrı ayrı tahmin eder; haftalık takvim katsayısı, 10 dakikalık zaman dilimi ağırlıkları ve eşzamanlı koridor yük katsayısı (`%38`) ile hattın en kritik darboğaz noktasındaki tren başına yolcu yükü hesaplanır.
-    - **Vagon Dizilim Kuralı:** Vagon başına maksimum konfor kapasitesi **150 yolcu** alınarak hat geneli için **3 ile 10 vagon** arasında ortak dizi önerisi sunulur.
+    st.markdown(f"### 📈 {selected_line.split(' ')[1]} Hattı Günlük Saatlik Profil (05:00 – 23:00)")
+    hourly_profile = []
+    for h in range(5, 24):
+        h_sum = sum(predict_station_hourly(st_c, h, day_idx, is_weekend, month_val) for st_c in line_stations)
+        hourly_profile.append({"Saat": f"{h:02d}:00", "Hat Toplam Yolcu": h_sum})
+    st.line_chart(pd.DataFrame(hourly_profile).set_index("Saat"), color="#38bdf8")
+
+with st.expander("📂 Veri Seti ve Model Özeti (BTK 15 Aşama Standartları)"):
+    eda = meta.get("eda_summary", {})
+    metrics = meta.get("final_metrics", {})
+    st.markdown(f"""
+    - **Veri Kaynağı & Lisans:** Bay Area Rapid Transit (BART) Resmi Açık Veri Portalı (`date-hour-soo-dest-2025.csv`, Creative Commons Attribution **CC-BY**)[cite: 369].
+    - **Veri Seti Kapsamı:** `{eda.get('date_min', '2025-01-01')}` – `{eda.get('date_max', '2025-12-31')}` arası toplam **{eda.get('total_rows', 'N/A'):,}** istasyon-saat gözlemi ve **{eda.get('num_stations', 50)}** istasyon.
+    - **Hold-out Test Performansı:** `MAE = {metrics.get('Test_MAE', 'N/A')}`, `RMSE = {metrics.get('Test_RMSE', 'N/A')}`, `R² = {metrics.get('Test_R2', 'N/A')}`.
+    - **Sıfır Sentetik Katsayı:** Uygulamada hiçbir yapay çarpan kullanılmamıştır; 10 dakikalık sefer penceresi saatlik gerçek model tahmininin tam **1/6'sı** olarak hesaplanır.
     """)
