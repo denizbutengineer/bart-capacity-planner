@@ -38,6 +38,21 @@ model = artifact["model"]
 features = artifact["features"]
 line_mapping = artifact["line_mapping"]
 
+# Geriye dönük uyumluluk: Eski artifact yüklüyse Hist_Group_Mean lookup hazırla
+hist_lookup = {}
+global_mean = 489.27
+if "Hist_Group_Mean" in features and "sample_data" in artifact:
+    s_df = artifact["sample_data"].copy()
+    s_df["Date"] = pd.to_datetime(s_df["Date"])
+    s_df["Line_Code"] = s_df["Line"].map(line_mapping)
+    s_df["Is_Weekend"] = (s_df["Date"].dt.dayofweek >= 5).astype(int)
+    hist_lookup = (
+        s_df.groupby(["Line_Code", "Direction", "Hour", "Is_Weekend"])["Max_Segment_Load"]
+        .mean()
+        .to_dict()
+    )
+    global_mean = float(s_df["Max_Segment_Load"].mean())
+
 # Kenar Çubuğu — İleriye Dönük Sefer Planlama Girdileri
 st.sidebar.header("🗓️ Gelecek Sefer Planlama Girdileri")
 
@@ -53,7 +68,6 @@ direction_label = st.sidebar.radio(
 )
 selected_dir = 0 if "Dir 0" in direction_label else 1
 
-# Varsayılan olarak bugünün tarihi (ileriye dönük planlama)
 today = datetime.date.today()
 selected_date = st.sidebar.date_input(
     "Planlanan Sefer Tarihi",
@@ -83,9 +97,10 @@ def build_feature_row(line_name, direction, dt_val, hour):
     dow = dt.dayofweek
     is_wknd = int(dow >= 5)
     is_peak = int(((7 <= hour <= 9) or (16 <= hour <= 18)) and (is_wknd == 0) and (is_hol == 0))
+    line_code = line_mapping[line_name]
     
     row = {
-        "Line_Code": line_mapping[line_name],
+        "Line_Code": line_code,
         "Direction": direction,
         "Hour": hour,
         "Hour_Sin": np.sin(2 * np.pi * hour / 24.0),
@@ -97,7 +112,8 @@ def build_feature_row(line_name, direction, dt_val, hour):
         "WeekOfYear": int(dt.isocalendar().week),
         "DayOfYear": int(dt.dayofyear),
         "Is_Holiday": is_hol,
-        "Is_Commute_Peak": is_peak
+        "Is_Commute_Peak": is_peak,
+        "Hist_Group_Mean": hist_lookup.get((line_code, direction, hour, is_wknd), global_mean)
     }
     return row, bool(is_hol), bool(is_peak)
 
@@ -171,7 +187,7 @@ with right_col:
 
 st.divider()
 
-# 7 Günlük Operasyonel Vagon Çizelgesi Tablosu (Geçmiş veri yerine gelecek planlama tablosu)
+# 7 Günlük İleriye Dönük Vagon Atama Çizelgesi
 st.subheader("📋 7 Günlük İleriye Dönük Vagon Atama Çizelgesi")
 schedule_rows = []
 for d, load_val in zip(next_7_dates, preds_7d):
@@ -187,8 +203,24 @@ for d, load_val in zip(next_7_dates, preds_7d):
 
 st.dataframe(pd.DataFrame(schedule_rows), use_container_width=True)
 
-with st.expander("🧠 Model Özellik Önem Düzeyi (Feature Importance)"):
-    imp_df = pd.DataFrame({"Özellik": features, "Önem": model.feature_importances_}).sort_values("Önem", ascending=False)
-    fig3, ax3 = plt.subplots(figsize=(8, 3.5))
-    sns.barplot(data=imp_df, x="Önem", y="Özellik", ax=ax3, palette="viridis")
-    st.pyplot(fig3)
+# Alt Bölüm: Özellik Önem Düzeyi & Veri Seti Özeti (BTK Yönerge Bölüm 6.1 Uyumu)
+col_exp1, col_exp2 = st.columns(2)
+
+with col_exp1:
+    with st.expander("🧠 Model Özellik Önem Düzeyi (Feature Importance)"):
+        imp_df = pd.DataFrame({"Özellik": features, "Önem": model.feature_importances_}).sort_values("Önem", ascending=False)
+        fig3, ax3 = plt.subplots(figsize=(7, 4))
+        sns.barplot(data=imp_df, x="Önem", y="Özellik", ax=ax3, palette="viridis")
+        st.pyplot(fig3)
+
+with col_exp2:
+    with st.expander("ℹ️ Veri Seti ve Eğitim Özeti (BTK Proje Kapsamı)"):
+        st.markdown("""
+        * **Veri Kaynağı:** BART 2025 Saatlik Origin-Destination (O-D) Açık Veri Seti (`9.143.257` ham yolculuk kaydı)
+        * **İşlenmiş Gözlem Sayısı:** `87.600` hat-yön-saat kesit yükü kaydı (5 Ana Hat × 2 Yön × 365 Gün × 24 Saat)
+        * **Hedef Değişken:** `Max_Segment_Load` (Ortalama: `489.3`, Maksimum: `4.739` yolcu/saat)
+        * **Seçilen Model:** Tuned LightGBM (`log1p` hedef dönüşümü + kronolojik doğrulama)
+        * **Operasyonel Kısıt:** BART yeni nesil Alstom D/E serisi filo sınırlarına uygun 3–10 vagon dizilimi
+        """)
+
+st.caption("⚠️ Model Sınırlılığı: Tahminler 2025 yılı tarihsel BART O-D akışlarına dayanmaktadır; planlı hat bakımları, hava koşulları veya özel etkinlikler anlık sapmalara yol açabilir.")
