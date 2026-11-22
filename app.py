@@ -11,12 +11,27 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("🚆 Demiryolu 10 Dakikalık Kesit Tahmini ve Tren Seti (Consist) Planlayıcı")
 st.markdown(
-    "Bu karar destek sistemi, seçilen gelecek tarih ve 10 dakikalık zaman dilimindeki "
-    "kritik kesit yolcu yükünü öngörür ve planlanan sefer aralığına (headway) göre "
-    "en uygun vagon dizisini (**3–10 vagon**) belirler."
+    """
+    <style>
+    .block-container {padding-top: 2rem; padding-bottom: 2rem;}
+    div[data-testid="stMetric"] {
+        background-color: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        padding: 16px;
+        border-radius: 10px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
+
+st.title("🚆 Demiryolu 10 Dakikalık Kesit Tahmini ve Tren Seti (Consist) Planlayıcı")
+st.caption(
+    "Seçilen tarih ve 10 dakikalık zaman diliminde kritik kesit yolcu yükünü tahmin eder; "
+    "sefer aralığına (headway) göre 3–10 vagon aralığında dizilim önerir."
+)
+st.divider()
 
 LINE_MAPPING = {"Blue": 0, "Green": 1, "Orange": 2, "Red": 3, "Yellow": 4}
 DEFAULT_FEATURES = [
@@ -51,7 +66,7 @@ ALIAS_MAP = {
 @st.cache_resource
 def load_model_artifact(path: str = "bart_model.json"):
     if not os.path.exists(path):
-        raise FileNotFoundError(f"'{path}' bulunamadı. Lütfen Colab'da kaydedip repoya yükleyin.")
+        raise FileNotFoundError(f"'{path}' bulunamadı.")
     model = xgb.XGBRegressor()
     model.load_model(path)
     return model, DEFAULT_FEATURES, LINE_MAPPING
@@ -131,23 +146,23 @@ except FileNotFoundError as exc:
     st.stop()
 
 with st.sidebar:
-    st.header("Planlama Parametreleri")
-    selected_date = st.date_input("Tarih Seçin", value=pd.Timestamp("2025-12-15").date())
+    st.header("Parametreler")
+    selected_date = st.date_input("Tarih", value=pd.Timestamp("2025-12-15").date())
     selected_line = st.selectbox("Hat", options=list(line_map.keys()))
     selected_dir = st.selectbox("Yön", options=[0, 1], format_func=lambda d: "Gidiş (0)" if d == 0 else "Dönüş (1)")
 
     slot_of_day = st.slider("10 Dakikalık Slot (0–143)", min_value=0, max_value=143, value=51)
     hh = (slot_of_day * 10) // 60
     mm = (slot_of_day * 10) % 60
-    st.caption(f"Karşılık gelen saat dilimi: **{hh:02d}:{mm:02d}**")
+    st.caption(f"Saat dilimi: **{hh:02d}:{mm:02d}**")
 
-    headway = st.slider("Sefer Aralığı / Headway (dakika)", min_value=5, max_value=30, value=15, step=5)
-    cap_per_car = st.slider("Vagon Başına Hedef Kapasite (yolcu)", min_value=60, max_value=150, value=110, step=5)
+    headway = st.slider("Sefer Aralığı (dk)", min_value=5, max_value=30, value=15, step=5)
+    cap_per_car = st.slider("Vagon Kapasitesi (yolcu)", min_value=60, max_value=150, value=110, step=5)
 
-    st.subheader("Geçmiş Talep Girdileri (Opsiyonel)")
-    lag_1d = st.number_input("1 Gün Önceki Yük (Lag_1d)", min_value=0.0, value=220.0, step=10.0)
-    lag_7d = st.number_input("1 Hafta Önceki Yük (Lag_7d)", min_value=0.0, value=240.0, step=10.0)
-    rolling_7d = st.number_input("7 Günlük Kaydırılmış Ortalama", min_value=0.0, value=230.0, step=10.0)
+    with st.expander("Geçmiş Yük Girdileri"):
+        lag_1d = st.number_input("1 Gün Önce (Lag_1d)", min_value=0.0, value=220.0, step=10.0)
+        lag_7d = st.number_input("1 Hafta Önce (Lag_7d)", min_value=0.0, value=240.0, step=10.0)
+        rolling_7d = st.number_input("7 Günlük Ortalama", min_value=0.0, value=230.0, step=10.0)
 
 row_dict = build_feature_row(
     target_date=pd.Timestamp(selected_date),
@@ -166,9 +181,9 @@ pred_load = float(np.clip(np.expm1(pred_log), 0.0, None))
 rec_cars = recommend_car_consist(pred_load, headway_minutes=headway, target_cap_per_car=cap_per_car)
 
 col1, col2, col3 = st.columns(3)
-col1.metric("Tahmini 10 Dakikalık Kesit Yükü", f"{pred_load:,.1f} yolcu")
-col2.metric("Sefer Başına Tahmini Yük", f"{pred_load / max(10.0 / headway, 0.25):,.1f} yolcu")
-col3.metric("Önerilen Tren Dizilimi", f"{rec_cars} Vagon")
+col1.metric("10 Dakikalık Kesit Yükü", f"{pred_load:,.1f} yolcu")
+col2.metric("Sefer Başına Yük", f"{pred_load / max(10.0 / headway, 0.25):,.1f} yolcu")
+col3.metric("Önerilen Dizilim", f"{rec_cars} Vagon")
 
 with st.expander("Modele Gönderilen Özellik Satırı (X_single)"):
     st.dataframe(X_single, use_container_width=True)
