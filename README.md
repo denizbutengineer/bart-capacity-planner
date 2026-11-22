@@ -1,23 +1,44 @@
-# 🚆 BART Hat Bazlı 10 Dakikalık Yolcu Yoğunluğu ve Vagon Optimizasyonu
+Demiryolu Kapasite Planlayıcısı
+10 dakikalık zaman dilimlerinde hat kesit yükünü (segment load) tahmin eden ve öngörülen yolcu talebine göre sefer başına vagon dizilimi (consist) önerisi üreten makine öğrenmesi ve raylı sistem planlama uygulaması. Çalışmada örnek raylı ağ veri seti olarak 2025 yılı saatlik Başlangıç-Varış (O-D) yolcu hareketliliği (9.143.257 satır) kullanılmıştır.
 
-Bay Area Rapid Transit (BART) açık ulaşım verileri (`date-hour-soo-dest-2025.csv`) kullanılarak geliştirilmiş, makine öğrenmesi tabanlı talep tahmini ve **hat koridoru darboğazına göre dinamik vagon dizilimi (3–10 vagon)** karar destek sistemi.
+Öne Çıkan Özellikler
+Graf Tabanlı Kesit Yükü Hesabı: Hatlar yönlü graf (NetworkX DiGraph) olarak modellenir; ortak koridorlardaki yolcu talebi koridoru paylaşan hat sayısına orantılı dağıtılır ve hat/yön bazında maksimum kesit yükü (Max_Segment_Load) çıkarılır.
 
-🔗 **Canlı Uygulama (Streamlit Cloud):** [https://denizbutengineer-bart-capacity-planner-app-tjy8q7.streamlit.app](https://denizbutengineer-bart-capacity-planner-app-tjy8q7.streamlit.app)
+Bellek Dostu İşleme Hattı: Yüksek hacimli O-D verisi aylık dilimler ve tamsayı Edge_ID eşlemeleriyle işlenerek bellek kullanımı sınırlandırılır.
 
-## 📊 Veri Seti ve Lisans
-- **Kaynak:** [BART Official Ridership Reports](https://www.bart.gov/about/reports/ridership) (`date-hour-soo-dest-2025.csv`)
-- **Lisans:** Creative Commons Attribution License (**CC-BY**)
-- **Özellik:** Tamamen gerçek gözlem verileri kullanılmış olup eğitim ve çıkarım aşamalarında hiçbir sentetik veri veya yapay katsayı eklenmemiştir.
+Sızıntısız 10 Dakikalık Zaman Dilimleri: Saatlik yükler 6 adet 10 dakikalık slota ayrılır ve yalnızca geçmişe bakan (center=False) hareketli ortalama ile pürüzsüzleştirilir.
 
-## 🛠️ Metodoloji (15 Aşamalı Veri Bilimi Pipeline'ı)
-1. **Veri Kalitesi & Dönüşüm:** Gece işletme dışı saatler (`01:00–04:00`) ve negatif değerler temizlenmiş, başlangıç-varış kayıtları istasyon ve saat bazında (`Total_Riders`) toplulaştırılmıştır.
-2. **EDA & Özellik Seçimi:** Sağa çarpık (Right-Skewed) yolcu dağılımı ve çift tepeli (Bimodal) pik saat örüntüleri analiz edilmiş; Filter (`VarianceThreshold`, `SelectKBest`, `Mutual Info`), Wrapper (`RFE`) ve Embedded (`Lasso L1`, `Random Forest Importance`) yöntemleriyle öznitelikler doğrulanmıştır.
-3. **Doğrulama Protokolü:** Veri sızıntısını (Data Leakage) önlemek için `shuffle=False` ile kronolojik ayrım (%70 Train / %15 Validation / %15 Test) ve 3 katlı `TimeSeriesSplit` kullanılmıştır.
-4. **Model Karşılaştırma & Optimizasyon:** `OLS Linear Regression` baseline dahil 9 regresyon modeli kıyaslanmış; `RandomizedSearchCV` ile optimize edilen **XGBoost Regressor** canlı sisteme entegre edilmiştir.
+Zengin Özellik Mühendisliği: Hat/yön kodları, takvim ve resmi tatil göstergeleri, sabah/akşam pik saat bayrakları, sin/cos döngüsel zaman özellikleri ve geçmiş gün/hafta gecikme (Lag_1d, Lag_7d, Rolling_Mean_7d) değişkenleri üretilir.
 
-## 🚀 Yerel Kurulum ve Çalıştırma
-```bash
-git clone [https://github.com/denizbutengineer/bart-capacity-planner.git](https://github.com/denizbutengineer/bart-capacity-planner.git)
-cd bart-capacity-planner
-pip install -r requirements.txt
-streamlit run app.py
+Vagon Dizilimi Optimizasyonu: Tahmin edilen 10 dakikalık kesit yükü ve sefer sıklığı (headway_minutes) kullanılarak vagon başına hedef kapasiteye göre 3–10 vagon aralığında dizilim önerisi hesaplanır.
+
+Veri ve Kronolojik Bölünme
+Ham Veri: date-hour-soo-dest-2025.csv.zip (9.143.257 satır).   
+date-hour-soo-dest-2025.zip
+
+Eğitim (Train): Ocak – Eylül (383.040 satır)
+
+Doğrulama (Validation): Ekim – Kasım (87.840 satır)
+
+Test: Aralık (44.640 satır)
+
+Model Karşılaştırması (Validation Seti)
+Model	RMSE	MAE	R 
+2
+ 
+CatBoost	21.34	9.83	0.9504
+XGBoost	21.66	10.44	0.9489
+LightGBM	21.99	10.31	0.9473
+Baseline (Group Mean)	34.94	16.80	0.8671
+Ridge Regression	160.69	40.10	-1.8105
+Final model (Aralık test seti): RMSE: 54.01, MAE: 23.57, 
+𝑅
+2
+R 
+2
+ : 0.57.
+
+Proje Yapısı
+Eğitim ve veri boru hattı defteri: Google Colab üzerinde çalıştırılan 6 aşamalı iş akışı (sonunda bart_capacity_xgb.joblib çıktı dosyası üretilir).
+
+Arayüz uygulaması: bart-capacity-planner (Streamlit tabanlı kapasite ve vagon dizilimi planlayıcısı).
