@@ -1,151 +1,203 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import json
-import datetime
-from xgboost import XGBRegressor
+import joblib
+import holidays
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-st.set_page_config(page_title="BART Hat Bazlı Peron & Vagon Optimizasyonu", page_icon="🚆", layout="wide")
+# Sayfa Yapılandırması
+st.set_page_config(
+    page_title="BART Hat Kapasite ve Vagon Planlayıcı",
+    page_icon="🚆",
+    layout="wide"
+)
 
+# 1. Model ve Artefakt Yükleme (Hata Kontrollü)
 @st.cache_resource
-def load_assets():
-    xgb_model = XGBRegressor()
-    xgb_model.load_model("bart_xgb.json")
-    with open("bart_meta.json", "r") as f:
-        meta = json.load(f)
-    return xgb_model, meta
+def load_artifact():
+    try:
+        return joblib.load("bart_final_artifact.joblib")
+    except FileNotFoundError:
+        return None
 
-model, meta = load_assets()
+artifact = load_artifact()
 
-STATION_NAMES = {
-    "EMBR": "Embarcadero (SF Downtown)",
-    "MONT": "Montgomery St. (Financial Dist.)",
-    "POWL": "Powell St. (Union Square)",
-    "CIVC": "Civic Center / UN Plaza",
-    "16TH": "16th St. Mission",
-    "24TH": "24th St. Mission",
-    "DALY": "Daly City",
-    "SFIA": "San Francisco Int. Airport (SFO)",
-    "MLBR": "Millbrae (Caltrain Aktarma)",
-    "WOAK": "West Oakland (Transbay)",
-    "12TH": "12th St. Oakland City Center",
-    "19TH": "19th St. Oakland",
-    "DBRK": "Downtown Berkeley",
-    "OAKL": "Oakland Int. Airport (OAK)",
-    "FRMT": "Fremont",
-    "BERY": "Berryessa / North San José"
-}
+# Üst Başlık ve Proje Açıklaması (Yönerge 6.1)
+st.title("🚆 BART Hat Bazlı Kapasite Tahmini ve Tren Seti (Consist) Planlayıcı")
+st.markdown("""
+Bu uygulama, **Bay Area Rapid Transit (BART)** 2025 saatlik Başlangıç-Varış (Origin-Destination) verileri üzerinden 
+ağ yönlendirme (Network Routing) yöntemiyle hesaplanan **Hat Maksimum Kesit Yükünü (`Max_Segment_Load`)** tahmin eder 
+ve sefer sıklığına göre en uygun **vagon dizisi (3–10 vagon)** önerisini sunar.
+""")
 
-BART_LINES = {
-    "🟡 Yellow Line (East Bay – Transbay – SFO)": ["19TH", "12TH", "WOAK", "EMBR", "MONT", "POWL", "CIVC", "16TH", "24TH", "DALY", "SFIA"],
-    "🔴 Red Line (Berkeley – Transbay – Millbrae)": ["DBRK", "19TH", "12TH", "WOAK", "EMBR", "MONT", "POWL", "CIVC", "16TH", "24TH", "DALY", "MLBR"],
-    "🔵 Blue Line (Transbay – Daly City Koridoru)": ["WOAK", "EMBR", "MONT", "POWL", "CIVC", "16TH", "24TH", "DALY"],
-    "🟢 Green Line (South Bay / Berryessa – Daly City)": ["BERY", "FRMT", "WOAK", "EMBR", "MONT", "POWL", "CIVC", "16TH", "24TH", "DALY"],
-    "🟠 Orange Line (South Bay / Berryessa – Berkeley)": ["BERY", "FRMT", "OAKL", "12TH", "19TH", "DBRK"]
-}
+if artifact is None:
+    st.error("Model dosyası (`bart_final_artifact.joblib`) bulunamadı! Lütfen dosyanın `app.py` ile aynı dizinde olduğundan emin olun.")
+    st.stop()
 
-SLOT_KEYS = ["00 - 10", "10 - 20", "20 - 30", "30 - 40", "40 - 50", "50 - 00"]
-GUNLER_TR = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
+model = artifact["model"]
+features = artifact["features"]
+line_mapping = artifact["line_mapping"]
+sample_df = artifact["sample_data"].copy()
 
-def predict_station_hourly(origin_code: str, hour: int, day_idx: int, is_weekend: int, month_val: int) -> int:
-    is_commute_peak = 1 if ((is_weekend == 0) and ((7 <= hour <= 9) or (16 <= hour <= 19))) else 0
-    hour_sin = np.sin(2 * np.pi * hour / 24.0)
-    hour_cos = np.cos(2 * np.pi * hour / 24.0)
-    is_transbay_core = 1 if origin_code in {'EMBR', 'MONT', 'POWL', 'CIVC', 'WOAK', '12TH', '19TH'} else 0
-    is_airport = 1 if origin_code in {'SFIA', 'OAKL', 'MLBR'} else 0
+# Tarihsel grup ortalaması (Hist_Group_Mean) lookup tablosu hazırlığı
+sample_df["Date"] = pd.to_datetime(sample_df["Date"])
+sample_df["Line_Code"] = sample_df["Line"].map(line_mapping)
+sample_df["Is_Weekend"] = (sample_df["Date"].dt.dayofweek >= 5).astype(int)
+hist_lookup = (
+    sample_df.groupby(["Line_Code", "Direction", "Hour", "Is_Weekend"])["Max_Segment_Load"]
+    .mean()
+    .to_dict()
+)
+global_mean = float(sample_df["Max_Segment_Load"].mean())
 
-    center = np.array(meta["center"], dtype=float)
-    scale = np.array(meta["scale"], dtype=float)
+# Kenar Çubuğu (Sidebar) — Kullanıcı Girdileri (Yönerge 6.1)
+st.sidebar.header("🛠️ Sefer Parametreleri")
 
-    feature_map = {
-        "Hour": float(hour),
-        "DayOfWeek": float(day_idx),
-        "Is_Weekend": float(is_weekend),
-        "Month": float(month_val),
-        "Is_Commute_Peak": float(is_commute_peak),
-        "Hour_Sin": float(hour_sin),
-        "Hour_Cos": float(hour_cos),
-        "Is_Transbay_Core": float(is_transbay_core),
-        "Is_Airport": float(is_airport),
-    }
+selected_line = st.sidebar.selectbox(
+    "Hat Seçimi (BART Line)",
+    options=list(line_mapping.keys()),
+    index=0
+)
 
-    if "num_features" in meta and len(meta["num_features"]) == len(center):
-        num_raw = np.array([feature_map[col] for col in meta["num_features"]], dtype=float)
-    elif len(center) == 9:
-        num_raw = np.array([
-            hour, day_idx, is_weekend, month_val,
-            is_commute_peak, hour_sin, hour_cos, is_transbay_core, is_airport
-        ], dtype=float)
-    else:
-        num_raw = np.array([
-            hour, is_commute_peak, hour_sin, hour_cos, is_transbay_core, is_airport
-        ], dtype=float)
+direction_label = st.sidebar.radio(
+    "Sefer Yönü",
+    options=["San Francisco / Güney Yönü (Dir 0)", "Doğu Körfez / Kuzey Yönü (Dir 1)"]
+)
+selected_dir = 0 if "Dir 0" in direction_label else 1
 
-    safe_scale = np.where(scale == 0, 1.0, scale)
-    num_scaled = (num_raw - center) / safe_scale
-    cat_ohe = np.array([1.0 if st_code == origin_code else 0.0 for st_code in meta["stations"]], dtype=float)
-    X_input = np.concatenate([num_scaled, cat_ohe]).reshape(1, -1)
+selected_date = st.sidebar.date_input(
+    "Tarih",
+    value=pd.to_datetime("2025-11-20")
+)
 
-    return max(0, int(round(float(model.predict(X_input)[0]))))
+selected_hour = st.sidebar.slider(
+    "Saat Dilimi (00:00 - 23:00)",
+    min_value=0,
+    max_value=23,
+    value=8
+)
 
-st.title("🚆 BART Hat Bazlı 10-Dk Yolcu Yoğunluğu ve Vagon Optimizasyonu")
-st.markdown("Yalnızca gerçek BART açık verileriyle (`date-hour-soo-dest-2025.csv`) eğitilmiş `XGBoost` modeli ve **hat koridoru darboğazına göre** vagon dizilimi karar destek sistemi.")
+trains_per_hour = st.sidebar.slider(
+    "Saatlik Sefer Sıklığı (Tren / Saat)",
+    min_value=2,
+    max_value=6,
+    value=4,
+    help="BART pik saatlerde saatte 4-5 tren, normal saatlerde 3 tren işletir."
+)
 
-with st.sidebar:
-    st.header("⚙️ Hat ve Sefer Parametreleri")
-    selected_line = st.selectbox("BART Hattı Seçiniz", options=list(BART_LINES.keys()))
-    line_stations = BART_LINES[selected_line]
-
-    today = datetime.date.today()
-    selected_date = st.date_input(
-        "Gelecek Planlama Tarihi",
-        value=today + datetime.timedelta(days=1),
-        min_value=today
-    )
+# Tahmin Hesaplama Fonksiyonu
+def predict_consist(line_name, direction, dt_val, hour, headway_freq):
+    dt = pd.to_datetime(dt_val)
+    ca_hol = holidays.US(state="CA", years=[dt.year])
+    is_hol = int(dt.date() in ca_hol)
+    dow = dt.dayofweek
+    is_wknd = int(dow >= 5)
+    is_peak = int(((7 <= hour <= 9) or (16 <= hour <= 18)) and (is_wknd == 0) and (is_hol == 0))
+    line_code = line_mapping[line_name]
     
-    hour = st.slider("Saat (05:00 - 23:00)", min_value=5, max_value=23, value=8)
-    slot_label = st.selectbox("10 Dakikalık Zaman Dilimi", options=SLOT_KEYS, index=1)
-    trains_in_10min = st.selectbox("Bu 10 Dakikadaki Hat Sefer Sayısı", options=[1, 2, 3], index=0)
+    hist_val = hist_lookup.get((line_code, direction, hour, is_wknd), global_mean)
+    
+    input_dict = {
+        "Line_Code": line_code,
+        "Direction": direction,
+        "Hour": hour,
+        "Hour_Sin": np.sin(2 * np.pi * hour / 24.0),
+        "Hour_Cos": np.cos(2 * np.pi * hour / 24.0),
+        "DayOfWeek": dow,
+        "Is_Weekend": is_wknd,
+        "Month": dt.month,
+        "DayOfMonth": dt.day,
+        "Is_Holiday": is_hol,
+        "Is_Commute_Peak": is_peak,
+        "Hist_Group_Mean": hist_val
+    }
+    
+    X_input = pd.DataFrame([input_dict])[features]
+    pred_hourly_load = max(0.0, float(np.expm1(model.predict(X_input)[0])))
+    
+    # Tek trene düşen maksimum yük (%10 operasyonel emniyet payı dahil)
+    load_per_train = (pred_hourly_load / headway_freq) * 1.10
+    
+    if pred_hourly_load < 15:
+        consist = "Sefer Yok / Bakım Aralığı"
+        status = "Geceleri (01:00 - 04:00) BART ağır raylı seferleri durdurulur."
+    elif load_per_train < 250:
+        consist = "3 - 4 Vagon"
+        status = "Düşük Talep — Enerji tasarrufu için kısa dizi önerilir."
+    elif load_per_train < 550:
+        consist = "5 - 6 Vagon"
+        status = "Normal Talep — Standart gün ortası / hafta sonu dizisi."
+    elif load_per_train < 850:
+        consist = "7 - 8 Vagon"
+        status = "Yüksek Talep — Yoğun koridor geçişi."
+    else:
+        consist = "9 - 10 Vagon (Maksimum)"
+        status = "Pik Kapasite — Transbay darboğazı için tam uzunlukta set."
+        
+    return pred_hourly_load, load_per_train, consist, status, bool(is_hol), bool(is_peak)
 
-day_idx = selected_date.weekday()
-day_name = GUNLER_TR[day_idx]
-is_weekend = 1 if day_idx >= 5 else 0
-month_val = selected_date.month
+hourly_load, train_load, consist_rec, status_msg, is_hol_flag, is_peak_flag = predict_consist(
+    selected_line, selected_dir, selected_date, selected_hour, trains_per_hour
+)
 
-# Ham veri saatlik çözünürlükte olduğundan 10 dk penceresi saatlik tahminin tam 1/6'sıdır
-slot_weight = 1.0 / 6.0
+# Ana Panel — Tahmin Sonuçları ve Metrikler
+st.subheader("📊 Operasyonel Tahmin ve Vagon Önerisi")
 
-station_rows = []
-for st_code in line_stations:
-    h_pred = predict_station_hourly(st_code, hour, day_idx, is_weekend, month_val)
-    s_pred = int(round(h_pred * slot_weight))
-    station_rows.append({
-        "Kod": st_code,
-        "İstasyon": STATION_NAMES.get(st_code, st_code),
-        "Saatlik Talep": h_pred,
-        "10 Dk Talep": s_pred
-    })
+col1, col2, col3 = st.columns(3)
+col1.metric("Saatlik Max Kesit Yükü", f"{hourly_load:,.0f} yolcu/saat")
+col2.metric("Tren Başına Kritik Yük (+%10 Pay)", f"{train_load:,.0f} yolcu/tren")
+col3.metric("Önerilen Tren Seti", consist_rec)
 
-line_df = pd.DataFrame(station_rows)
-total_line_hourly = int(line_df["Saatlik Talep"].sum())
-total_line_10min = int(line_df["10 Dk Talep"].sum())
+if is_hol_flag:
+    st.info("📅 Seçilen tarih Kaliforniya resmi tatil gününe denk gelmektedir; model tatil düşüşünü hesaba katmıştır.")
+elif is_peak_flag:
+    st.warning("⚡ Seçilen zaman dilimi hafta içi işe gidiş-geliş pik saatidir (Commute Peak).")
 
-bottleneck_row = line_df.loc[line_df["10 Dk Talep"].idxmax()]
-bottleneck_10min_load = int(bottleneck_row["10 Dk Talep"])
-passengers_per_train = bottleneck_10min_load / trains_in_10min
-
-required_cars = int(np.ceil(passengers_per_train / 150.0))
-recommended_consist = min(10, max(3, required_cars))
-train_capacity = recommended_consist * 150
-occupancy_rate = min(100.0, (passengers_per_train / train_capacity) * 100)
-
-st.subheader(f"{selected_line} | {selected_date.strftime('%d.%m.%Y')} ({day_name}) | {hour:02d}:{slot_label.split(' - ')[0]} – {hour:02d}:{slot_label.split(' - ')[1]}")
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Hat Toplam 10 Dk Talep", f"{total_line_10min:,} kişi", f"Saatlik Hat: {total_line_hourly:,}")
-col2.metric("Darboğaz Tren Başına Yük", f"{int(passengers_per_train):,} kişi", f"Kritik İstasyon: {bottleneck_row['Kod']}")
-col3.metric("Hat Vagon Dizilimi", f"{recommended_consist} Vagonlu Set")
-col4.metric("Kritik İstasyon Doluluğu", f"%{occupancy_rate:.1f}")
+st.success(f"**Operasyonel Karar Notu:** {status_msg}")
 
 st.divider()
 
-left_col, right_col = st.columns([1
+# İki Kolonlu Alt Bölüm: 24 Saatlik Gün İçi Profil & Feature Importance (Yönerge 6.1 & 6.2)
+left_col, right_col = st.columns(2)
+
+with left_col:
+    st.subheader(f"📈 {selected_line} Hattı — 24 Saatlik Talep Eğrisi")
+    hours_range = list(range(24))
+    hourly_curve = [
+        predict_consist(selected_line, selected_dir, selected_date, h, trains_per_hour)[0]
+        for h in hours_range
+    ]
+    curve_df = pd.DataFrame({"Saat": hours_range, "Tahmini Kesit Yükü": hourly_curve})
+    
+    fig1, ax1 = plt.subplots(figsize=(7, 4))
+    sns.lineplot(data=curve_df, x="Saat", y="Tahmini Kesit Yükü", marker="o", ax=ax1, color="#005596")
+    ax1.axvline(selected_hour, color="red", linestyle="--", label=f"Seçili Saat ({selected_hour}:00)")
+    ax1.set_xticks(range(0, 24, 2))
+    ax1.set_ylabel("Yolcu / Saat")
+    ax1.legend()
+    st.pyplot(fig1)
+
+with right_col:
+    st.subheader("🧠 Model Özellik Önem Düzeyi (Feature Importance)")
+    imp_df = pd.DataFrame({
+        "Özellik": features,
+        "Önem": model.feature_importances_
+    }).sort_values("Önem", ascending=False)
+    
+    fig2, ax2 = plt.subplots(figsize=(7, 4))
+    sns.barplot(data=imp_df, x="Önem", y="Özellik", ax=ax2, palette="viridis")
+    ax2.set_xlabel("Bölünme Kazancı (Split Importance)")
+    st.pyplot(fig2)
+
+st.divider()
+
+# Örnek Veri Seti İnceleme Bölümü (Yönerge 6.1 Zorunlu Madde)
+with st.expander("📂 Örnek Test Veri Seti ve İstatistiksel Özet (BART 2025)"):
+    st.write("Modelin değerlendirildiği Hold-out test kesitinden örnek kayıtlar:")
+    st.dataframe(sample_df[["Date", "Hour", "Line", "Direction", "Max_Segment_Load"]].head(50), use_container_width=True)
+    st.write("**Özet İstatistikler:**")
+    st.dataframe(sample_df[["Max_Segment_Load"]].describe().T, use_container_width=True)
+
+# Sınırlılıklar ve Etik Bilgilendirme (Yönerge Bölüm 11)
+st.caption("⚠️ Model Sınırlılığı: Tahminler 2025 yılı tarihsel BART O-D akışlarına dayanmaktadır; planlı hat bakımları, hava koşulları veya özel stadyum/konser etkinlikleri anlık sapmalara yol açabilir.")
