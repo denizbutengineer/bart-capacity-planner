@@ -112,7 +112,7 @@ day_name = GUNLER_TR[day_idx]
 is_weekend = 1 if day_idx >= 5 else 0
 month_val = selected_date.month
 
-# Ham veri saatlik çözünürlükte olduğu için her 10 dk penceresi saatlik tahminin tam 1/6'sıdır (sıfır sentetik katsayı)
+# Ham veri saatlik çözünürlükte olduğundan 10 dk penceresi saatlik tahminin tam 1/6'sıdır
 slot_weight = 1.0 / 6.0
 
 station_rows = []
@@ -148,37 +148,4 @@ col4.metric("Kritik İstasyon Doluluğu", f"%{occupancy_rate:.1f}")
 
 st.divider()
 
-left_col, right_col = st.columns([1.15, 1])
-
-with left_col:
-    st.markdown("### 🚦 Hat Operasyonel Karar Özeti")
-    if occupancy_rate > 90:
-        st.error(f"⚠️ **Hat Darboğazı / Kritik Yığılma:** `{bottleneck_row['İstasyon']}` istasyonunda yüksek talep bekleniyor. Hattaki tüm seferler **10 vagonlu maksimum dizi** ile işletilmelidir.")
-    elif occupancy_rate > 65:
-        st.warning(f"🟡 **Dengeli Hat İşletmesi:** `{recommended_consist} vagonlu` tren dizilimi `{bottleneck_row['Kod']}` darboğaz istasyonu dahil tüm hattı konfor sınırlarında karşılamaktadır.")
-    else:
-        st.success(f"🟢 **Hat Boyu Enerji Optimizasyonu:** `{hour:02d}:{slot_label}` penceresinde talep düşüktür; **{recommended_consist} vagonlu kısa dizi** ile cer enerjisi tasarrufu sağlanabilir.")
-    
-    st.markdown("#### 📍 Hat Üzerindeki İstasyonların Gerçek Model Tahminleri")
-    st.dataframe(line_df, use_container_width=True, hide_index=True)
-
-with right_col:
-    st.markdown("### 🚉 İstasyon Bazlı Darboğaz Karşılaştırması")
-    st.bar_chart(line_df.set_index("Kod")[["10 Dk Talep"]], color="#f59e0b")
-
-    st.markdown(f"### 📈 {selected_line.split(' ')[1]} Hattı Günlük Saatlik Profil (05:00 – 23:00)")
-    hourly_profile = []
-    for h in range(5, 24):
-        h_sum = sum(predict_station_hourly(st_c, h, day_idx, is_weekend, month_val) for st_c in line_stations)
-        hourly_profile.append({"Saat": f"{h:02d}:00", "Hat Toplam Yolcu": h_sum})
-    st.line_chart(pd.DataFrame(hourly_profile).set_index("Saat"), color="#38bdf8")
-
-with st.expander("📂 Veri Seti ve Model Özeti (BTK 15 Aşama Standartları)"):
-    eda = meta.get("eda_summary", {})
-    metrics = meta.get("final_metrics", {})
-    st.markdown(f"""
-    - **Veri Kaynağı & Lisans:** Bay Area Rapid Transit (BART) Resmi Açık Veri Portalı (`date-hour-soo-dest-2025.csv`, Creative Commons Attribution **CC-BY**)[cite: 369].
-    - **Veri Seti Kapsamı:** `{eda.get('date_min', '2025-01-01')}` – `{eda.get('date_max', '2025-12-31')}` arası toplam **{eda.get('total_rows', 'N/A'):,}** istasyon-saat gözlemi ve **{eda.get('num_stations', 50)}** istasyon.
-    - **Hold-out Test Performansı:** `MAE = {metrics.get('Test_MAE', 'N/A')}`, `RMSE = {metrics.get('Test_RMSE', 'N/A')}`, `R² = {metrics.get('Test_R2', 'N/A')}`.
-    - **Sıfır Sentetik Katsayı:** Uygulamada hiçbir yapay çarpan kullanılmamıştır; 10 dakikalık sefer penceresi saatlik gerçek model tahmininin tam **1/6'sı** olarak hesaplanır.
-    """)
+left_col, right_col = st.columns([1
