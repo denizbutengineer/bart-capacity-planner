@@ -1,0 +1,47 @@
+{
+  "feature_cols": [
+    "Line_Code",
+    "Direction",
+    "Slot_Of_Day",
+    "Day_Of_Week",
+    "Is_Weekend",
+    "Month",
+    "Day_Of_Year",
+    "Is_Holiday",
+    "Slot_Sin",
+    "Slot_Cos",
+    "Dow_Sin",
+    "Dow_Cos",
+    "Is_AM_Peak",
+    "Is_PM_Peak",
+    "Lag_1d",
+    "Lag_7d",
+    "Rolling_Mean_7d"
+  ],
+  "line_mapping": {
+    "Blue": 0,
+    "Green": 1,
+    "Orange": 2,
+    "Red": 3,
+    "Yellow": 4
+  },
+  "target": "Max_Segment_Load",
+  "target_transform": "log1p",
+  "training_period": "2025-01-08 to 2025-11-30",
+  "test_period": "2025-12-01 to 2025-12-31",
+  "lag_definition": {
+    "Lag_1d": "Aynı hat, yön ve 10 dakikalık slotun bir gün önceki Max_Segment_Load değeri",
+    "Lag_7d": "Aynı hat, yön ve 10 dakikalık slotun yedi gün önceki Max_Segment_Load değeri",
+    "Rolling_Mean_7d": "Aynı hat, yön ve 10 dakikalık slotun önceki yedi günlük Max_Segment_Load ortalaması"
+  },
+  "best_xgb_params": {
+    "subsample": 0.7,
+    "reg_lambda": 5.0,
+    "n_estimators": 450,
+    "min_child_weight": 3,
+    "max_depth": 8,
+    "learning_rate": 0.02,
+    "colsample_bytree": 0.7
+  },
+  "random_state": 42
+}
