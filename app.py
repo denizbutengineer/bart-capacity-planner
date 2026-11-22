@@ -1,9 +1,16 @@
+import json
+from pathlib import Path
+
 import holidays
 import numpy as np
 import pandas as pd
 import streamlit as st
 import xgboost as xgb
 
+
+# -----------------------------------------------------------------------------
+# Sayfa yapılandırması
+# -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="Demiryolu Kapasite Planlayıcısı",
     page_icon="🚆",
@@ -16,7 +23,7 @@ st.markdown(
     .block-container {padding-top: 2rem; padding-bottom: 2rem;}
     div[data-testid="stMetric"] {
         background-color: rgba(255, 255, 255, 0.04);
-        border: 1px solid rgba(255, 255, 255, 0.12);
+        border: 1px solid rgba(128, 128, 128, 0.25);
         padding: 16px;
         border-radius: 10px;
     }
@@ -25,48 +32,90 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("🚆 Demiryolu 10 Dakikalık Kesit Tahmini ve Tren Seti (Consist) Planlayıcı")
-st.caption(
-    "Seçilen tarih ve 10 dakikalık zaman diliminde kritik kesit yolcu yükünü tahmin eder; "
-    "sefer aralığına (headway) göre 3–10 vagon aralığında dizilim önerir."
-)
-st.divider()
-
-LINE_MAPPING = {"Blue": 0, "Green": 1, "Orange": 2, "Red": 3, "Yellow": 4}
-LINE_MULTIPLIER = {"Blue": 1.05, "Green": 0.90, "Orange": 0.95, "Red": 1.15, "Yellow": 1.20}
-DEFAULT_FEATURES = [
-    "Line_Code", "Direction", "Slot_Of_Day",
-    "Day_Of_Week", "Is_Weekend", "Month", "Day_Of_Year", "Is_Holiday",
-    "Slot_Sin", "Slot_Cos", "Dow_Sin", "Dow_Cos",
-    "Is_AM_Peak", "Is_PM_Peak",
-    "Lag_1d", "Lag_7d", "Rolling_Mean_7d",
-]
+MODEL_DIR = Path(__file__).resolve().parent
+MODEL_PATH = MODEL_DIR / "bart_model.json"
+METADATA_PATH = MODEL_DIR / "model_metadata.json"
 
 
+# -----------------------------------------------------------------------------
+# Model ve metadata yükleme
+# -----------------------------------------------------------------------------
+@st.cache_resource(show_spinner="Eğitilmiş XGBoost modeli yükleniyor...")
+def load_model():
+    if not MODEL_PATH.exists():
+        raise FileNotFoundError(
+            f"Model dosyası bulunamadı: {MODEL_PATH.name}"
+        )
+
+    if not METADATA_PATH.exists():
+        raise FileNotFoundError(
+            f"Model metadata dosyası bulunamadı: {METADATA_PATH.name}"
+        )
+
+    model = xgb.XGBRegressor()
+    model.load_model(str(MODEL_PATH))
+
+    with open(METADATA_PATH, "r", encoding="utf-8") as file:
+        metadata = json.load(file)
+
+    feature_cols = metadata.get("feature_cols")
+    line_mapping = metadata.get("line_mapping")
+
+    if not feature_cols or not line_mapping:
+        raise ValueError(
+            "model_metadata.json içinde feature_cols veya line_mapping bulunamadı."
+        )
+
+    if len(feature_cols) != 17:
+        raise ValueError(
+            f"Beklenen özellik sayısı 17; metadata içinde {len(feature_cols)} özellik var."
+        )
+
+    return model, feature_cols, line_mapping, metadata
+
+
+try:
+    model, features, line_map, metadata = load_model()
+except Exception as exc:
+    st.error(f"Model yüklenemedi: {exc}")
+    st.stop()
+
+
+# -----------------------------------------------------------------------------
+# Eğitim notebook'u ile aynı özellik üretimi
+# -----------------------------------------------------------------------------
 def build_feature_row(
     target_date: pd.Timestamp,
     line_name: str,
     direction: int,
     slot_of_day: int,
-    line_map: dict,
+    line_mapping: dict,
     lag_1d: float,
     lag_7d: float,
     rolling_mean_7d: float,
 ) -> dict:
+    target_date = pd.Timestamp(target_date)
+
     day_of_week = int(target_date.dayofweek)
     is_weekend = int(day_of_week >= 5)
     month = int(target_date.month)
     day_of_year = int(target_date.dayofyear)
 
-    us_ca_holidays = holidays.US(subdiv="CA", years=[target_date.year])
-    is_holiday = int(target_date.normalize() in us_ca_holidays)
+    holiday_calendar = holidays.US(
+        subdiv="CA",
+        years=[target_date.year]
+    )
+    is_holiday = int(target_date.date() in holiday_calendar)
 
     is_workday = (is_weekend == 0) and (is_holiday == 0)
-    is_am_peak = int(is_workday and (42 <= slot_of_day <= 57))
-    is_pm_peak = int(is_workday and (99 <= slot_of_day <= 114))
+    is_am_peak = int(is_workday and 42 <= slot_of_day <= 57)
+    is_pm_peak = int(is_workday and 99 <= slot_of_day <= 114)
+
+    if line_name not in line_mapping:
+        raise ValueError(f"Bilinmeyen hat: {line_name}")
 
     return {
-        "Line_Code": int(line_map.get(line_name, 0)),
+        "Line_Code": int(line_mapping[line_name]),
         "Direction": int(direction),
         "Slot_Of_Day": int(slot_of_day),
         "Day_Of_Week": day_of_week,
@@ -86,116 +135,208 @@ def build_feature_row(
     }
 
 
-@st.cache_resource
-def load_or_build_model():
-    rng = np.random.default_rng(42)
-    rows = []
-    targets = []
-
-    line_names = list(LINE_MAPPING.keys())
-    sample_dates = pd.date_range("2025-10-01", "2025-11-30", freq="D")
-
-    for dt in sample_dates:
-        for line_name in line_names:
-            mult = LINE_MULTIPLIER[line_name]
-            for direction in (0, 1):
-                for slot in range(0, 144, 3):
-                    am_bump = 240.0 * np.exp(-0.5 * ((slot - 50) / 8.0) ** 2)
-                    pm_bump = 260.0 * np.exp(-0.5 * ((slot - 106) / 9.0) ** 2)
-                    base = 25.0 + am_bump + pm_bump
-                    weekend_factor = 0.55 if dt.dayofweek >= 5 else 1.0
-                    dir_factor = 1.08 if direction == 0 else 0.94
-
-                    lag_7d = max(5.0, base * mult * weekend_factor * dir_factor + rng.normal(0, 12))
-                    lag_1d = max(5.0, lag_7d + rng.normal(0, 15))
-                    roll_7d = max(5.0, 0.5 * lag_1d + 0.5 * lag_7d + rng.normal(0, 8))
-
-                    feat = build_feature_row(
-                        target_date=pd.Timestamp(dt),
-                        line_name=line_name,
-                        direction=direction,
-                        slot_of_day=slot,
-                        line_map=LINE_MAPPING,
-                        lag_1d=lag_1d,
-                        lag_7d=lag_7d,
-                        rolling_mean_7d=roll_7d,
-                    )
-                    load_val = max(
-                        5.0,
-                        0.45 * roll_7d + 0.35 * lag_1d + 0.20 * (base * mult * weekend_factor * dir_factor) + rng.normal(0, 10),
-                    )
-                    rows.append(feat)
-                    targets.append(np.log1p(load_val))
-
-    X_train_sim = pd.DataFrame(rows)[DEFAULT_FEATURES]
-    y_train_sim = np.array(targets, dtype=np.float32)
-
-    model = xgb.XGBRegressor(
-        n_estimators=180,
-        learning_rate=0.06,
-        max_depth=6,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        tree_method="hist",
-        random_state=42,
-        n_jobs=-1,
-    )
-    model.fit(X_train_sim, y_train_sim)
-    return model, DEFAULT_FEATURES, LINE_MAPPING
-
-
+# -----------------------------------------------------------------------------
+# Vagon dizilimi hesabı
+# -----------------------------------------------------------------------------
 def recommend_car_consist(
     predicted_10min_load: float,
     headway_minutes: int = 15,
     target_cap_per_car: int = 110,
-) -> int:
-    trains_in_10min = 10.0 / max(headway_minutes, 1)
+):
+    headway_minutes = max(float(headway_minutes), 1.0)
+    target_cap_per_car = max(float(target_cap_per_car), 1.0)
+
+    trains_in_10min = 10.0 / headway_minutes
     passengers_per_train = predicted_10min_load / max(trains_in_10min, 0.25)
-    required_cars = int(np.ceil(passengers_per_train / max(target_cap_per_car, 1)))
-    return int(np.clip(required_cars, 3, 10))
+
+    required_cars = int(
+        np.ceil(passengers_per_train / target_cap_per_car)
+    )
+    recommended_cars = int(np.clip(required_cars, 3, 10))
+
+    return passengers_per_train, required_cars, recommended_cars
 
 
-model, features, line_map = load_or_build_model()
+# -----------------------------------------------------------------------------
+# Arayüz
+# -----------------------------------------------------------------------------
+st.title("🚆 Demiryolu Kapasite Planlayıcısı")
+st.subheader("10 Dakikalık Kesit Yükü Tahmini ve Tren Seti Planlaması")
+st.write(
+    "Seçilen hat, yön, tarih ve 10 dakikalık zaman dilimi için tahmini kesit yükünü "
+    "hesaplar. Ardından sefer aralığı ve vagon başına hedef kapasiteye göre tren "
+    "seti önerisi üretir."
+)
+st.divider()
 
-with st.sidebar:
-    st.header("Parametreler")
-    selected_date = st.date_input("Tarih", value=pd.Timestamp("2025-12-15").date())
-    selected_line = st.selectbox("Hat", options=list(line_map.keys()))
-    selected_dir = st.selectbox("Yön", options=[0, 1], format_func=lambda d: "Gidiş (0)" if d == 0 else "Dönüş (1)")
-
-    slot_of_day = st.slider("10 Dakikalık Slot (0–143)", min_value=0, max_value=143, value=51)
-    hh = (slot_of_day * 10) // 60
-    mm = (slot_of_day * 10) % 60
-    st.caption(f"Saat dilimi: **{hh:02d}:{mm:02d}**")
-
-    headway = st.slider("Sefer Aralığı (dk)", min_value=5, max_value=30, value=15, step=5)
-    cap_per_car = st.slider("Vagon Kapasitesi (yolcu)", min_value=60, max_value=150, value=110, step=5)
-
-    with st.expander("Geçmiş Yük Girdileri"):
-        lag_1d = st.number_input("1 Gün Önce (Lag_1d)", min_value=0.0, value=220.0, step=10.0)
-        lag_7d = st.number_input("1 Hafta Önce (Lag_7d)", min_value=0.0, value=240.0, step=10.0)
-        rolling_7d = st.number_input("7 Günlük Ortalama", min_value=0.0, value=230.0, step=10.0)
-
-row_dict = build_feature_row(
-    target_date=pd.Timestamp(selected_date),
-    line_name=selected_line,
-    direction=selected_dir,
-    slot_of_day=slot_of_day,
-    line_map=line_map,
-    lag_1d=lag_1d,
-    lag_7d=lag_7d,
-    rolling_mean_7d=rolling_mean_7d,
+training_period = metadata.get("training_period", "2025")
+st.caption(
+    f"Model eğitim dönemi: {training_period}. "
+    "Tahminler modelin öğrendiği dönem ve veri varsayımlarıyla sınırlıdır."
 )
 
-X_single = pd.DataFrame([row_dict])[features]
-pred_log = model.predict(X_single)[0]
-pred_load = float(np.clip(np.expm1(pred_log), 0.0, None))
-rec_cars = recommend_car_consist(pred_load, headway_minutes=headway, target_cap_per_car=cap_per_car)
+with st.sidebar:
+    st.header("Tahmin Parametreleri")
+
+    selected_date = st.date_input(
+        "Tahmin Tarihi",
+        value=pd.Timestamp("2025-12-15").date(),
+        min_value=pd.Timestamp("2025-01-01").date(),
+        max_value=pd.Timestamp("2030-12-31").date(),
+    )
+
+    selected_line = st.selectbox(
+        "Hat",
+        options=list(line_map.keys())
+    )
+
+    selected_direction = st.selectbox(
+        "Yön",
+        options=[0, 1],
+        format_func=lambda value: "Gidiş (0)" if value == 0 else "Dönüş (1)"
+    )
+
+    slot_of_day = st.slider(
+        "10 Dakikalık Slot",
+        min_value=0,
+        max_value=143,
+        value=51,
+        help="0 = 00:00, 51 = 08:30, 143 = 23:50"
+    )
+
+    hour = (slot_of_day * 10) // 60
+    minute = (slot_of_day * 10) % 60
+    st.caption(f"Seçilen zaman: **{hour:02d}:{minute:02d}**")
+
+    headway = st.slider(
+        "Sefer Aralığı (dakika)",
+        min_value=5,
+        max_value=30,
+        value=15,
+        step=5
+    )
+
+    cap_per_car = st.slider(
+        "Vagon Başına Hedef Kapasite",
+        min_value=60,
+        max_value=150,
+        value=110,
+        step=5
+    )
+
+    st.subheader("Geçmiş Yük Girdileri")
+    st.caption(
+        "Aynı hat, yön ve 10 dakikalık slot için geçmiş verileri girin. "
+        "Varsayılan değerler yalnızca örnek senaryodur."
+    )
+
+    lag_1d = st.number_input(
+        "1 Gün Önce — Lag_1d",
+        min_value=0.0,
+        value=220.0,
+        step=10.0
+    )
+
+    lag_7d = st.number_input(
+        "7 Gün Önce — Lag_7d",
+        min_value=0.0,
+        value=240.0,
+        step=10.0
+    )
+
+    rolling_7d = st.number_input(
+        "Önceki 7 Günün Aynı Slot Ortalama Yükü",
+        min_value=0.0,
+        value=230.0,
+        step=10.0
+    )
+
+# -----------------------------------------------------------------------------
+# Tahmin girdisini oluştur ve sırayı metadata'daki feature_cols ile eşleştir.
+# -----------------------------------------------------------------------------
+target_timestamp = pd.Timestamp(selected_date)
+
+row_dict = build_feature_row(
+    target_date=target_timestamp,
+    line_name=selected_line,
+    direction=selected_direction,
+    slot_of_day=slot_of_day,
+    line_mapping=line_map,
+    lag_1d=lag_1d,
+    lag_7d=lag_7d,
+    rolling_mean_7d=rolling_7d,
+)
+
+X_single = pd.DataFrame([row_dict], columns=features)
+
+if X_single.isna().any().any():
+    st.error("Model girdisinde eksik özellik bulundu. Girdileri kontrol edin.")
+    st.stop()
+
+try:
+    predicted_log = float(model.predict(X_single)[0])
+    predicted_load = float(np.clip(np.expm1(predicted_log), 0.0, None))
+except Exception as exc:
+    st.error(f"Tahmin sırasında hata oluştu: {exc}")
+    st.stop()
+
+passengers_per_train, required_cars, recommended_cars = recommend_car_consist(
+    predicted_10min_load=predicted_load,
+    headway_minutes=headway,
+    target_cap_per_car=cap_per_car,
+)
 
 col1, col2, col3 = st.columns(3)
-col1.metric("10 Dakikalık Kesit Yükü", f"{pred_load:,.1f} yolcu")
-col2.metric("Sefer Başına Yük", f"{pred_load / max(10.0 / headway, 0.25):,.1f} yolcu")
-col3.metric("Önerilen Dizilim", f"{rec_cars} Vagon")
+col1.metric(
+    "10 Dakikalık Tahmini Kesit Yükü",
+    f"{predicted_load:,.1f} yolcu"
+)
+col2.metric(
+    "Sefer Başına Tahmini Yük",
+    f"{passengers_per_train:,.1f} yolcu"
+)
+col3.metric(
+    "Önerilen Tren Dizilimi",
+    f"{recommended_cars} vagon"
+)
 
-with st.expander("Modele Gönderilen Özellik Satırı (X_single)"):
-    st.dataframe(X_single, use_container_width=True)
+if required_cars > 10:
+    st.error(
+        f"Hesaplanan ihtiyaç {required_cars} vagon. Sistem en fazla 10 vagon "
+        "önerdiği için bu dizilim hedef kapasiteyi karşılamayabilir."
+    )
+elif required_cars < 3:
+    st.info(
+        f"Hesaplanan teorik ihtiyaç {required_cars} vagon. "
+        "Sistem alt sınır gereği 3 vagon öneriyor."
+    )
+else:
+    st.success(
+        f"Hesaplanan vagon ihtiyacı {required_cars}; önerilen dizilim "
+        f"{recommended_cars} vagondur."
+    )
+
+if target_timestamp.year != 2025:
+    st.warning(
+        "Seçilen tarih modelin eğitim yılı olan 2025 dışındadır. "
+        "Bu tarihler için tahminler dönem dışı kullanım olarak değerlendirilmelidir."
+    )
+
+st.divider()
+st.subheader("Modele Gönderilen Özellikler")
+st.dataframe(X_single, use_container_width=True)
+
+with st.expander("Tahmin ve kapasite hesaplama ayrıntıları"):
+    st.write(f"Tahmin edilen log yük: {predicted_log:.6f}")
+    st.write(f"10 dakikalık tahmini yük: {predicted_load:.2f}")
+    st.write(f"Sefer aralığı: {headway} dakika")
+    st.write(f"Vagon başına hedef kapasite: {cap_per_car} yolcu")
+    st.write(f"Sınırlanmamış teorik vagon ihtiyacı: {required_cars}")
+    st.write(f"3–10 aralığında önerilen vagon sayısı: {recommended_cars}")
+
+st.caption(
+    "Uyarı: Bu uygulama karar destek amaçlı bir prototiptir. "
+    "Tahminler saatlik O-D verisinden türetilen 10 dakikalık göstergeye dayanır; "
+    "gerçek zamanlı sensör veya turnike ölçümü değildir. Operasyonel kararlar "
+    "öncesinde gerçek işletme verileriyle doğrulanmalıdır."
+)
