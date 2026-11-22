@@ -201,4 +201,16 @@ with right_col:
     st.markdown(f"### 📊 {hour:02d}:00 Saati İçi Hat 10 Dk Akışı")
     chart_df = pd.DataFrame({
         "10 Dk Dilimi": [f"{hour:02d}:{k.split(' - ')[0]}" for k in slot_weights_dict.keys()],
-        "Hat Toplam Yolcu": [int(round(total_line_hourly * w)) for w in slot_weights_dict.values
+        "Hat Toplam Yolcu": [int(round(total_line_hourly * w)) for w in slot_weights_dict.values()]
+    }).set_index("10 Dk Dilimi")
+    st.bar_chart(chart_df, color="#38bdf8")
+
+    st.markdown("### 🚉 İstasyon Bazlı Darboğaz Karşılaştırması")
+    st.bar_chart(line_df.set_index("Kod")[["10 Dk Talep"]], color="#f59e0b")
+
+with st.expander("📂 Veri Seti ve Hat Optimizasyon Metodolojisi"):
+    st.markdown("""
+    - **Veri Kaynağı & Lisans:** Bay Area Rapid Transit (BART) Resmi Açık Veri Portalı (*Hourly Ridership by Origin-Destination Pairs*, Creative Commons Attribution **CC-BY**)[cite: 369].
+    - **Hat Bazlı Modelleme Yaklaşımı:** `XGBoost Regressor` modeli seçilen hat koridorundaki tüm istasyonların saatlik biniş talebini ayrı ayrı tahmin eder; 10 dakikalık zaman dilimi ağırlıkları ve eşzamanlı koridor yük katsayısı (`%38`) ile hattın en kritik darboğaz noktasındaki tren başına yolcu yükü hesaplanır.
+    - **Vagon Dizilim Kuralı:** Vagon başına maksimum konfor kapasitesi **150 yolcu** alınarak hat geneli için **3 ile 10 vagon** arasında ortak dizi önerisi sunulur.
+    """)
