@@ -7,7 +7,6 @@ from xgboost import XGBRegressor
 
 st.set_page_config(page_title="BART 10-Dk Peron & Vagon Optimizasyonu", page_icon="🚆", layout="wide")
 
-@st.cache_resource
 def load_assets():
     xgb_model = XGBRegressor()
     xgb_model.load_model("bart_xgb.json")
@@ -52,7 +51,6 @@ with st.sidebar:
     st.header("⚙️ Operasyonel Parametreler")
     origin_code = st.selectbox("Başlangıç İstasyonu", options=list(STATIONS.keys()), format_func=lambda x: f"{x} - {STATIONS[x]}")
     
-    # Geçmiş tarih seçimini tamamen engelle (Sadece bugün ve geleceğe yönelik planlama)
     today = datetime.date.today()
     selected_date = st.date_input(
         "Gelecek Planlama Tarihi",
@@ -64,7 +62,7 @@ with st.sidebar:
     slot_label = st.selectbox("10 Dakikalık Zaman Dilimi", options=list(SLOTS_10MIN.keys()), index=1)
     trains_in_10min = st.selectbox("Bu 10 Dakikadaki Tren Sefer Sayısı", options=[1, 2, 3], index=0)
 
-# Evrensel zamansal ve mekansal özellikler (Hücre 4 ile birebir aynı)
+# Evrensel zamansal ve mekansal özellikler (6 sayısal özellik)
 is_commute_peak = 1 if ((7 <= hour <= 9) or (16 <= hour <= 19)) else 0
 hour_sin = np.sin(2 * np.pi * hour / 24.0)
 hour_cos = np.cos(2 * np.pi * hour / 24.0)
@@ -72,12 +70,18 @@ is_transbay_core = 1 if origin_code in {'EMBR', 'MONT', 'POWL', 'CIVC', 'WOAK', 
 is_airport = 1 if origin_code in {'SFIA', 'OAKL', 'MLBR'} else 0
 
 num_raw = np.array([hour, is_commute_peak, hour_sin, hour_cos, is_transbay_core, is_airport], dtype=float)
-num_scaled = (num_raw - np.array(meta["center"])) / np.array(meta["scale"])
+center = np.array(meta["center"], dtype=float)
+scale = np.array(meta["scale"], dtype=float)
 
+if len(center) != len(num_raw):
+    st.error(f"Dosya sürüm uyuşmazlığı: bart_meta.json içinde {len(center)} özellik var, 6 bekleniyor. Lütfen en son indirdiğiniz bart_meta.json dosyasını GitHub'a yükleyin.")
+    st.stop()
+
+num_scaled = (num_raw - center) / scale
 cat_ohe = np.array([1.0 if st_code == origin_code else 0.0 for st_code in meta["stations"]], dtype=float)
 X_input = np.concatenate([num_scaled, cat_ohe]).reshape(1, -1)
 
-# 1. Doğrudan Modelin Gerçek Saatlik Tahmini (Sıfır sentetik müdahale)
+# 1. Doğrudan Modelin Gerçek Saatlik Tahmini
 hourly_pred = max(0, int(round(float(model.predict(X_input)[0]))))
 
 # 2. 10 Dakikalık Dilime Ölçekleme
@@ -91,7 +95,7 @@ else:
 slot_passengers = int(round(hourly_pred * slot_weight))
 passengers_per_train = slot_passengers / trains_in_10min
 
-# 3. Vagon Optimizasyonu (1 Vagon ≈ 150 yolcu kapasitesi, 3-10 vagon aralığı)
+# 3. Vagon Optimizasyonu
 required_cars = int(np.ceil(passengers_per_train / 150.0))
 recommended_consist = min(10, max(3, required_cars))
 train_capacity = recommended_consist * 150
