@@ -32,6 +32,6 @@ Final model (Aralık test seti): **RMSE: 54.01**, **MAE: 23.57**, **R²: 0.57**.
 ## Proje Yapısı
 
 - `btk_final_proje.ipynb`: Veri yükleme, ağ topolojisi, özellik mühendisliği, model eğitimi ve dışa aktarma iş akışı.
-- `bart_capacity_xgb.joblib`: Eğitilmiş final model ve meta veriler.
+- `bart_model.json` ve `model_metadata.json`: Eğitilmiş final model ve meta veriler.
 - `app.py`: Streamlit tabanlı kapasite ve vagon dizilimi planlayıcısı arayüzü.
 - `requirements.txt`: Uygulama bağımlılıkları.
